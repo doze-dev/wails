@@ -3,6 +3,7 @@
 package application
 
 import (
+	"sync"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -28,7 +29,24 @@ var (
 	dispatchAsync     func(queue uintptr, block objc.Block)
 )
 
-func init() {
+// The run loop bindings load on first use, not in init: a program that links
+// this package but never builds an App (a CLI, a daemon) must not map
+// CoreFoundation and libdispatch at startup, which costs about 1 MB of
+// resident memory per process. The main goroutine is locked to the startup
+// thread (init_desktop.go), so the first use from it is still on the main
+// thread.
+var loadMainThreadLibs sync.Once
+
+func ensureDarwinLibraries() {
+	loadMainThreadLibs.Do(loadDarwinLibraries)
+}
+
+// platformInit loads the run loop bindings when an App is built.
+func platformInit() {
+	ensureDarwinLibraries()
+}
+
+func loadDarwinLibraries() {
 	sys, err := purego.Dlopen("/usr/lib/libSystem.B.dylib", purego.RTLD_NOW|purego.RTLD_GLOBAL)
 	if err != nil {
 		panic("wails/purego: failed to load libSystem: " + err.Error())
@@ -55,6 +73,7 @@ func init() {
 // performOnMainRunLoop schedules fn on the main run loop in the common modes
 // and wakes it, so fn also runs inside nested (modal, menu tracking) loops.
 func performOnMainRunLoop(fn func()) {
+	ensureDarwinLibraries()
 	block := objc.NewBlock(func(objc.Block) { fn() })
 	mainLoop := cfRunLoopGetMain()
 	cfRunLoopPerformBlock(mainLoop, cfRunLoopCommonModes, block)

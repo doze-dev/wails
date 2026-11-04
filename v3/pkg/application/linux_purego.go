@@ -31,16 +31,35 @@ var (
 	fixSignalHandlers sync.Once
 )
 
-func init() {
-	linuxLibsErr = loadLinuxLibraries()
-	if linuxLibsErr == nil {
-		// Package init runs on the process's main thread, the same thread
-		// that will run the GTK main loop (matching the cgo init()).
-		mainThreadId = g_thread_self()
+// The GUI libraries load on first use, not in init: a program that links this
+// package but never opens a window (a CLI, a daemon) must not map GTK and
+// WebKitGTK, which costs ~30 MB and ~20 ms per process when they are installed.
+// The main goroutine is locked to the startup thread (init_desktop.go), so the
+// first use from it is still on the thread GTK will run on.
+var loadLibs sync.Once
+
+func ensureLinuxLibraries() error {
+	loadLibs.Do(func() {
+		linuxLibsErr = loadLinuxLibraries()
+		if linuxLibsErr == nil {
+			mainThreadId = g_thread_self()
+		}
+	})
+	return linuxLibsErr
+}
+
+// platformInit loads the GUI libraries when an App is built, on the main
+// goroutine, which init_desktop.go keeps on the startup thread.
+func platformInit() {
+	if err := ensureLinuxLibraries(); err != nil {
+		Fatal("%v", err)
 	}
 }
 
 func isOnMainThread() bool {
+	if ensureLinuxLibraries() != nil {
+		return false
+	}
 	return g_thread_self() == mainThreadId
 }
 
@@ -52,7 +71,7 @@ func appName() string {
 }
 
 func appNew(appID string) pointer {
-	if linuxLibsErr != nil {
+	if ensureLinuxLibraries() != nil {
 		// The GUI libraries are dlopen'ed at runtime; fail with the full
 		// actionable report (which libraries/symbols, what to install)
 		// instead of a nil-pointer crash on the first GTK call.
